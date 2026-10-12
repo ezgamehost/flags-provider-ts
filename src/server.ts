@@ -17,7 +17,7 @@ import {
 } from "@openfeature/server-sdk"
 import { changedKeys, Evaluator, type FlagType } from "./shared/evaluator.ts"
 import { backoffMs, childController, isFatalStatus, retryAfterMs, sleep, trimEndpoint } from "./shared/http.ts"
-import { readSSE } from "./shared/sse.ts"
+import { endReason, watchedSSE } from "./shared/sse.ts"
 
 export { DEFAULT_ENDPOINT } from "./shared/http.ts"
 
@@ -78,6 +78,8 @@ export class EzghProvider implements Provider {
 
   readonly #abort = new AbortController()
   #ev: Evaluator | null = null
+  /** The snapshot came from the data plane (not the bootstrap file), so its version can be named to it. */
+  #fromNetwork = false
   #init: "pending" | "done" | "failed" = "pending"
   #fatal = false
   #connected = false
@@ -110,7 +112,7 @@ export class EzghProvider implements Provider {
   async initialize(): Promise<void> {
     if (this.#bootstrapPath) {
       const { readFile } = await import("node:fs/promises")
-      this.#apply(await readFile(this.#bootstrapPath, "utf8"), { throwOnInvalid: true })
+      this.#apply(await readFile(this.#bootstrapPath, "utf8"), { throwOnInvalid: true, bootstrap: true })
     }
     if (this.#offline) {
       this.#init = "done"
@@ -158,8 +160,13 @@ export class EzghProvider implements Provider {
 
   // ---- snapshots
 
-  /** Swaps in a newer snapshot and announces the flags whose answers may have changed. */
-  #apply(json: string, opts: { throwOnInvalid?: boolean } = {}): void {
+  /**
+   * Swaps in a newer snapshot and announces it: PROVIDER_CONFIGURATION_CHANGED on every new
+   * version, with the flags whose answers may have changed (possibly none) and the snapshot
+   * version. A snapshot from the data plane always replaces a bootstrap file's, whatever their
+   * versions; between data-plane snapshots only a newer version counts.
+   */
+  #apply(json: string, opts: { throwOnInvalid?: boolean; bootstrap?: boolean } = {}): void {
     let next: Evaluator
     try {
       next = new Evaluator(json)
@@ -169,14 +176,15 @@ export class EzghProvider implements Provider {
       return
     }
     const prev = this.#ev
-    if (prev && next.version <= prev.version) return
+    if (prev && this.#fromNetwork && next.version <= prev.version) return
     this.#ev = next
+    this.#fromNetwork = !opts.bootstrap
     if (!prev) {
       if (this.#init === "failed") this.events.emit(ProviderEvents.Ready)
       return
     }
     const flagsChanged = changedKeys(prev.fingerprints(), next.fingerprints())
-    if (flagsChanged.length > 0) this.events.emit(ProviderEvents.ConfigurationChanged, { flagsChanged })
+    this.events.emit(ProviderEvents.ConfigurationChanged, { flagsChanged, metadata: { snapshotVersion: next.version } })
   }
 
   #headers(extra: Record<string, string> = {}): Record<string, string> {
@@ -228,7 +236,11 @@ export class EzghProvider implements Provider {
       const out = await this.#streamOnce()
       if (out.kind === "fatal" || this.#abort.signal.aborted) return
       if (out.kind === "end") {
-        // rotate, shutdown, revoked: reconnect at once (a revoked key then gets its 401).
+        if (out.reason === "revoked") {
+          this.#fatalize("the SDK key was revoked")
+          return
+        }
+        // rotate, shutdown: reconnect at once (shutdown with a little jitter).
         failures = 0
         if (out.reason === "shutdown") await sleep(Math.random() * this.#minBackoff, this.#abort.signal)
         continue
@@ -250,7 +262,7 @@ export class EzghProvider implements Provider {
     const ctl = childController(this.#abort.signal)
     let res: Response
     try {
-      const body = this.#ev ? JSON.stringify({ version: this.#ev.version }) : "{}"
+      const body = this.#ev && this.#fromNetwork ? JSON.stringify({ version: this.#ev.version }) : "{}"
       res = await this.#fetch(`${this.#endpoint}/v1/sync/stream`, {
         method: "POST",
         headers: this.#headers({ "Content-Type": "application/json", Accept: "text/event-stream" }),
@@ -273,21 +285,8 @@ export class EzghProvider implements Provider {
     this.#connected = true
     this.#stopPolling()
     this.#contact()
-    let last = Date.now()
-    const idle = setInterval(() => {
-      if (Date.now() - last > this.#idleMs) ctl.abort()
-    }, Math.max(10, Math.min(this.#idleMs / 3, 5_000)))
-    const watched = res.body.pipeThrough(
-      new TransformStream<Uint8Array, Uint8Array>({
-        transform: (chunk, c) => {
-          last = Date.now()
-          this.#lastContact = last
-          c.enqueue(chunk)
-        },
-      }),
-    )
     try {
-      for await (const ev of readSSE(watched)) {
+      for await (const ev of watchedSSE(res.body, ctl, this.#idleMs, () => (this.#lastContact = Date.now()))) {
         if (ev.event === "snapshot") this.#apply(ev.data)
         else if (ev.event === "end") return { kind: "end", reason: endReason(ev.data) }
       }
@@ -295,7 +294,6 @@ export class EzghProvider implements Provider {
     } catch {
       return { kind: "failed", established: true }
     } finally {
-      clearInterval(idle)
       ctl.abort()
       this.#connected = false
       if (!this.#fatal) this.#scheduleStale()
@@ -322,7 +320,7 @@ export class EzghProvider implements Provider {
   /** One GET /v1/sync/snapshot with If-None-Match; answers a Retry-After to honour, if any. */
   async #pollOnce(signal: AbortSignal): Promise<number | undefined> {
     try {
-      const headers = this.#ev ? this.#headers({ "If-None-Match": `"${this.#ev.version}"` }) : this.#headers()
+      const headers = this.#ev && this.#fromNetwork ? this.#headers({ "If-None-Match": `"${this.#ev.version}"` }) : this.#headers()
       const res = await this.#fetch(`${this.#endpoint}/v1/sync/snapshot`, { headers, signal })
       if (res.status === 200) {
         this.#apply(await res.text())
@@ -378,14 +376,5 @@ export class EzghProvider implements Provider {
     this.#log.error(err.message)
     if (this.#init !== "pending") this.events.emit(ProviderEvents.Error, { errorCode: ErrorCode.PROVIDER_FATAL, message: err.message })
     return err
-  }
-}
-
-function endReason(data: string): string {
-  try {
-    const v = JSON.parse(data) as { reason?: unknown }
-    return typeof v.reason === "string" ? v.reason : "unknown"
-  } catch {
-    return "unknown"
   }
 }

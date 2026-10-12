@@ -93,6 +93,23 @@ test("configuration changed: the keys whose flagVersion changed", async () => {
   expect(await client.getBooleanValue("b", false)).toBe(true)
 })
 
+test("configuration changed on every new version, carrying snapshotVersion, flagsChanged possibly empty", async () => {
+  const p = provider()
+  await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1)
+  const changed = nextEvent(p, ProviderEvents.ConfigurationChanged)
+  fake.setSnapshot(snapshot(2, { a: bool(true, 1), b: bool(false, 1), n: { variants: { one: 1, two: 2 }, defaultVariant: "two", flagVersion: 1 } }))
+  const d = await changed
+  expect(d?.flagsChanged).toEqual([])
+  expect(d?.metadata?.snapshotVersion).toBe(2)
+  // The same version again (a duplicate delivery) announces nothing.
+  let again = false
+  p.events.addHandler(ProviderEvents.ConfigurationChanged, () => (again = true))
+  fake.setSnapshot(snapshot(2, { a: bool(false, 9) }))
+  await Bun.sleep(50)
+  expect(again).toBe(false)
+})
+
 test("configuration changed: added and removed flags, and a segment edit", async () => {
   const seg = (keys: string[]) => ({ "beta-testers": { in: [{ var: "targetingKey" }, keys] } })
   const targeted = bool(false, 1, { targeting: { if: [{ $ref: "beta-testers" }, "true"] } })
@@ -182,13 +199,26 @@ test("fatal on 401 at initialize", async () => {
   expect(fake.requests.length).toBe(1)
 })
 
-test("fatal when the key is revoked: end revoked, then 401 on reconnect", async () => {
+test("fatal at once on end revoked, with no reconnect", async () => {
+  const p = provider()
+  const client = await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1)
+  const err = nextEvent(p, ProviderEvents.Error)
+  fake.endStreams("revoked")
+  expect((await err)?.errorCode).toBe(ErrorCode.PROVIDER_FATAL)
+  expect(client.providerStatus).toBe(ProviderStatus.FATAL)
+  await Bun.sleep(150)
+  expect(streamOpens().length).toBe(1)
+  expect(fake.of("/v1/sync/snapshot").length).toBe(1)
+})
+
+test("fatal on 401 when reconnecting", async () => {
   const p = provider()
   const client = await ready(p)
   await fake.waitFor(() => fake.openStreams === 1)
   const err = nextEvent(p, ProviderEvents.Error)
   fake.revoked.add(serverKey())
-  fake.endStreams("revoked")
+  fake.dropStreams()
   expect((await err)?.errorCode).toBe(ErrorCode.PROVIDER_FATAL)
   expect(client.providerStatus).toBe(ProviderStatus.FATAL)
   const n = fake.requests.length
@@ -232,7 +262,8 @@ test("initialize gives up after its timeout, then recovers in the background", a
 test("bootstrap and offline", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ezgh-flags-"))
   const file = join(dir, "production.json")
-  writeFileSync(file, snapshot(5, { a: bool(false, 9) }))
+  // A bootstrap version above the data plane's: the data plane's snapshot still replaces it.
+  writeFileSync(file, snapshot(50, { a: bool(false, 9) }))
 
   // offline: only the file, never the network.
   const off = new EzghProvider({ offline: true, bootstrapPath: file, endpoint: fake.url })
@@ -252,6 +283,10 @@ test("bootstrap and offline", async () => {
   fake.force = null
   expect((await changed)?.flagsChanged).toEqual(["a"])
   expect(await client.getBooleanValue("a", false)).toBe(true)
+  // The bootstrap file's version is never named to the data plane.
+  for (const r of fake.of("/v1/sync/snapshot")) expect(r.headers["if-none-match"]).not.toBe('"50"')
+  for (const r of streamOpens().filter((r) => JSON.parse(r.body).version !== undefined)) expect(JSON.parse(r.body).version).toBe(6)
+  expect(JSON.parse(streamOpens()[0]!.body)).toEqual({})
 
   expect(() => new EzghProvider({ offline: true, sdkKey: serverKey() })).toThrow(/bootstrapPath/)
 })

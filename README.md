@@ -5,6 +5,8 @@
 - `@ezgh/flags-openfeature/server`: `EzghProvider`, for backends on Node (20+), Bun and Deno.
   It keeps the environment's compiled flags in memory and evaluates locally with flagd's
   open-source core, so an evaluation never makes a network call.
+- `@ezgh/flags-openfeature/web`: `EzghWebProvider`, for browsers (React through OpenFeature's
+  React SDK). It evaluates remotely, so rules never reach the browser.
 
 You write against the OpenFeature API; the provider connects it to EZGH. Licensed Apache-2.0.
 
@@ -20,7 +22,7 @@ pnpm add github:ezgamehost/flags-provider-ts#v0.1.0
 ```
 
 Install the OpenFeature SDK you use alongside it: `@openfeature/server-sdk` for the server
-provider.
+provider, `@openfeature/web-sdk` (and `@openfeature/react-sdk` for React) for the web provider.
 
 ## Server provider
 
@@ -43,12 +45,14 @@ if (await flags.getBooleanValue("new-checkout", false, { targetingKey: user.id, 
   follows the data plane's sync stream. If the stream fails three times in a row, it polls the
   snapshot every 30 seconds while it keeps retrying the stream (exponential backoff with jitter,
   honouring `Retry-After`).
-- **Changes** emit `PROVIDER_CONFIGURATION_CHANGED` with `flagsChanged`: the flags whose
-  configuration changed, appeared or disappeared (a segment edit counts for the flags using it).
+- **Changes:** every new snapshot version emits `PROVIDER_CONFIGURATION_CHANGED` with
+  `metadata.snapshotVersion` and `flagsChanged`: the flags whose configuration changed, appeared
+  or disappeared (a segment edit counts for the flags using it; the list can be empty).
 - **Disconnected** for 30 seconds: it keeps evaluating the last snapshot and emits
   `PROVIDER_STALE`, then `PROVIDER_READY` once it reaches the data plane again.
-- **A revoked or unknown key** is fatal: `PROVIDER_ERROR` with `PROVIDER_FATAL`, and the client
-  status becomes `FATAL` (OpenFeature then answers defaults).
+- **A revoked or unknown key** is fatal (a stream ending with `revoked`, or a `401`/`403`):
+  `PROVIDER_ERROR` with `PROVIDER_FATAL`, the client status becomes `FATAL` (OpenFeature then
+  answers defaults), and the provider stops.
 - **Reasons:** `TARGETING_MATCH`, `STATIC`, `DEFAULT`, and `DISABLED` for a flag that's off in
   the environment (with its off value). `flagMetadata.flagVersion` is the flag's config version.
 
@@ -58,7 +62,7 @@ if (await flags.getBooleanValue("new-checkout", false, { targetingKey: user.id, 
 | --- | --- | --- |
 | `sdkKey` | | A server key. Required unless `offline`. |
 | `endpoint` | `https://flags.ezghcloud.com` | The data plane. |
-| `bootstrapPath` | | A snapshot file from `ezgh flags export`. The provider is ready from it without the network, then syncs. |
+| `bootstrapPath` | | A snapshot file from `ezgh flags export`. The provider is ready from it without the network, then syncs; the data plane's snapshot replaces it whatever its version. |
 | `offline` | `false` | Use only `bootstrapPath` and never call the network (tests, CI, air-gapped runs). |
 | `timeoutMs` | `10000` | How long `initialize` waits for the first snapshot. On a timeout it fails (status `ERROR`) and keeps trying; it emits `PROVIDER_READY` when the snapshot arrives. |
 | `pollIntervalMs` | `30000` | The snapshot poll interval while the stream is down. |
@@ -73,6 +77,53 @@ if (await flags.getBooleanValue("new-checkout", false, { targetingKey: user.id, 
 // A file from `ezgh flags export --env production > flags.json`; no network at all.
 await OpenFeature.setProviderAndWait(new EzghProvider({ offline: true, bootstrapPath: "flags.json" }))
 ```
+
+## Browsers and React
+
+Create a **client key** (`ezgh_fc_…`) for the environment. It's publishable: ship it in your
+bundle. A client key only sees flags marked **client-side** (`clientSide: true`); any other flag
+answers `FLAG_NOT_FOUND` exactly as a flag that doesn't exist, and rules never leave EZGH.
+
+```ts
+import { OpenFeature } from "@openfeature/web-sdk"
+import { EzghWebProvider } from "@ezgh/flags-openfeature/web"
+
+await OpenFeature.setContext({ targetingKey: user.id, plan: user.plan })
+OpenFeature.setProvider(new EzghWebProvider({ clientKey: "ezgh_fc_…" }))
+```
+
+- **Evaluation:** one bulk evaluation of every client-side flag at startup and on every
+  `OpenFeature.setContext`; flags are then answered synchronously from those results.
+- **Refresh:** when the page becomes visible again and every 5 minutes (`refreshMs`), with
+  `If-None-Match`, so an unchanged answer costs a `304`. Changes emit
+  `PROVIDER_CONFIGURATION_CHANGED` with the flags whose value or variant changed.
+- **Live updates** are opt-in: `new EzghWebProvider({ clientKey, live: true })` keeps one stream
+  per tab open and refetches as soon as a client-side flag changes.
+- Nothing is stored in `localStorage` or `sessionStorage`; results live in memory only.
+- A revoked key is fatal (`PROVIDER_FATAL`), as for the server provider.
+
+With React, use OpenFeature's React SDK; there's no EZGH React package:
+
+```tsx
+import { OpenFeatureProvider, useBooleanFlagValue } from "@openfeature/react-sdk"
+
+function App() {
+  return (
+    <OpenFeatureProvider>
+      <Checkout />
+    </OpenFeatureProvider>
+  )
+}
+
+function Checkout() {
+  const newCheckout = useBooleanFlagValue("new-checkout", false)
+  return newCheckout ? <NewCheckout /> : <OldCheckout />
+}
+```
+
+Options: `clientKey`, `endpoint`, `live` (`false`), `refreshMs` (5 minutes), `timeoutMs` (10 s for
+the first evaluation; it keeps retrying after and emits `PROVIDER_READY`), `minBackoffMs`,
+`maxBackoffMs`, `idleTimeoutMs`, `fetch`, `logger`.
 
 ## Conformance
 

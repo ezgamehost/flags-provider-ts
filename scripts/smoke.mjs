@@ -6,9 +6,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { OpenFeature } from "@openfeature/server-sdk"
 import * as server from "../dist/server.js"
+import * as web from "../dist/web.js"
 
 assert.equal(typeof server.EzghProvider, "function")
 assert.equal(server.DEFAULT_ENDPOINT, "https://flags.ezghcloud.com")
+assert.equal(typeof web.EzghWebProvider, "function")
+assert.throws(() => new web.EzghWebProvider({ clientKey: "ezgh_fs_x" }), /client key/)
 
 // Offline from a bootstrap file (the basics vector's snapshot): ready with no network.
 const v = JSON.parse(readFileSync(new URL("../test/vectors/basics.json", import.meta.url), "utf8"))

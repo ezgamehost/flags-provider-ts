@@ -71,3 +71,39 @@ export async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator
     reader.releaseLock()
   }
 }
+
+/**
+ * readSSE over a stream that must not go silent: any byte (a heartbeat comment included) counts
+ * as activity, and after `idleMs` without any the controller is aborted, ending the read. Each
+ * chunk also calls `onActivity`.
+ */
+export async function* watchedSSE(body: ReadableStream<Uint8Array>, ctl: AbortController, idleMs: number, onActivity: () => void = () => {}): AsyncGenerator<SSEEvent> {
+  let last = Date.now()
+  const idle = setInterval(() => {
+    if (Date.now() - last > idleMs) ctl.abort()
+  }, Math.max(10, Math.min(idleMs / 3, 5_000)))
+  const watched = body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, c) {
+        last = Date.now()
+        onActivity()
+        c.enqueue(chunk)
+      },
+    }),
+  )
+  try {
+    yield* readSSE(watched)
+  } finally {
+    clearInterval(idle)
+  }
+}
+
+/** The reason of an `end` event (`{"reason": "rotate"}`), or "unknown". */
+export function endReason(data: string): string {
+  try {
+    const v = JSON.parse(data) as { reason?: unknown }
+    return typeof v.reason === "string" ? v.reason : "unknown"
+  } catch {
+    return "unknown"
+  }
+}
