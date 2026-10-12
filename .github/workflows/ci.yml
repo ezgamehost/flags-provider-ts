@@ -1,0 +1,76 @@
+name: CI
+
+# check: typecheck, unit tests (with flags-stack's conformance vectors, vendored in test/vectors),
+# the ESM build and a Node import smoke test.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+
+  # The vendored vectors (test/vectors) must be exactly flags-stack's protocol/vectors/eval at the
+  # commit in .flags-stack-rev, and every one must pass through this provider's evaluator.
+  # flags-stack is internal: the job reads it with the FLAGS_STACK_DEPLOY_KEY secret (a read-only
+  # deploy key on flags-stack), and fails on a push to main when the secret is missing (so a
+  # deleted key can't turn main silently green). Pull requests without it (forks get no secrets)
+  # skip with a notice.
+  vectors:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - id: token
+        env:
+          TOKEN: ${{ secrets.FLAGS_STACK_DEPLOY_KEY }}
+        run: |
+          if [ -n "$TOKEN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "::error title=vectors can't run::FLAGS_STACK_DEPLOY_KEY isn't set, so this job can't read ezgamehost/flags-stack. On main that's a failure, not a skip: restore the deploy key."; exit 1
+          else echo "::notice title=vectors skipped::FLAGS_STACK_DEPLOY_KEY isn't available to this pull request; the vectors weren't compared."; fi
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - if: steps.token.outputs.present == 'true'
+        id: rev
+        run: echo "sha=$(cat .flags-stack-rev)" >> "$GITHUB_OUTPUT"
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: ezgamehost/flags-stack
+          ref: ${{ steps.rev.outputs.sha }}
+          ssh-key: ${{ secrets.FLAGS_STACK_DEPLOY_KEY }}
+          path: .flags-stack
+          persist-credentials: false
+      - if: steps.token.outputs.present == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - if: steps.token.outputs.present == 'true'
+        run: bun install --frozen-lockfile
+      - if: steps.token.outputs.present == 'true'
+        name: vendored vectors match flags-stack
+        run: scripts/check-vectors.sh
+      - if: steps.token.outputs.present == 'true'
+        run: bun test test/vectors.test.ts

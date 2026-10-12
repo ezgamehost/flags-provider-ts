@@ -1,0 +1,62 @@
+{
+  "name": "@ezgh/flags-openfeature",
+  "version": "0.1.0",
+  "description": "OpenFeature providers for EZGH Feature Flags (server: Node, Bun, Deno; web)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ezgamehost/flags-provider-ts"
+  },
+  "exports": {
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./web": {
+      "types": "./dist/web.d.ts",
+      "default": "./dist/web.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test",
+    "smoke": "node scripts/smoke.mjs",
+    "check": "bun run typecheck && bun test && bun run build && bun run smoke && scripts/check-vectors.sh"
+  },
+  "dependencies": {
+    "@openfeature/flagd-core": "4.0.1"
+  },
+  "peerDependencies": {
+    "@openfeature/core": "^1.12.0",
+    "@openfeature/server-sdk": "^1.23.0",
+    "@openfeature/web-sdk": "^1.10.0"
+  },
+  "peerDependenciesMeta": {
+    "@openfeature/server-sdk": {
+      "optional": true
+    },
+    "@openfeature/web-sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@openfeature/core": "1.12.0",
+    "@openfeature/server-sdk": "1.23.0",
+    "@openfeature/web-sdk": "1.10.0",
+    "@types/bun": "1.4.2",
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3"
+  }
+}
