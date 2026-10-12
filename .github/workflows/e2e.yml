@@ -4,21 +4,25 @@ name: E2E
 # flags-api, the compiler worker, the change relay and flags-data), on Postgres 18 and Redis 8, with
 # org-api faked by flags-stack's cmd/fake-orgapi (scripts/e2e.sh).
 #
-# PENDING: manual dispatch only until flags-stack has the sync snapshot and streams (D3) and config
-# writes (A3), and .flags-stack-rev is moved past them. Then this runs on every push to main and on
-# pull requests (add the triggers below).
-#
 # flags-stack is internal: the job reads it with the FLAGS_STACK_DEPLOY_KEY secret (a read-only
 # deploy key), and fails on a push to main when the secret is missing; pull requests without it
 # (forks get no secrets) skip with a notice.
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
   e2e:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -47,7 +51,7 @@ jobs:
         run: |
           if [ -n "$TOKEN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "::error title=e2e can't run::FLAGS_STACK_DEPLOY_KEY isn't set, so this job can't read ezgamehost/flags-stack. Restore the deploy key."; exit 1
+            echo "::error title=e2e can't run::FLAGS_STACK_DEPLOY_KEY isn't set, so this job can't read ezgamehost/flags-stack. On main that's a failure, not a skip: restore the deploy key."; exit 1
           else echo "::notice title=e2e skipped::FLAGS_STACK_DEPLOY_KEY isn't available to this pull request; the end-to-end test didn't run."; fi
       - if: steps.token.outputs.present == 'true'
         uses: actions/checkout@v7
