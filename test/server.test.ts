@@ -414,3 +414,16 @@ test("reusable after onClose", async () => {
   expect((await p.resolveBooleanEvaluation("a", false, {})).value).toBe(true)
   await fake.waitFor(() => fake.openStreams === 1, 3000, "the stream again")
 })
+
+test("configuration changed: an inlined segment edit names the flags using it", async () => {
+  // The compiler inlines segments into each flag's targeting (no $evaluators).
+  const seg = (keys: string[]) => ({ if: [{ in: [{ var: "targetingKey" }, keys] }, "true"] })
+  fake.setSnapshot(snapshot(1, { a: bool(true, 1), t: bool(false, 1, { targeting: seg(["u1"]) }), u: bool(false, 2, { targeting: seg(["u1"]) }) }))
+  const p = provider()
+  const client = await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1)
+  const changed = nextEvent(p, ProviderEvents.ConfigurationChanged)
+  fake.setSnapshot(snapshot(2, { a: bool(true, 1), t: bool(false, 1, { targeting: seg(["u1", "u2"]) }), u: bool(false, 2, { targeting: seg(["u1", "u2"]) }) }))
+  expect((await changed)?.flagsChanged).toEqual(["t", "u"])
+  expect(await client.getBooleanValue("t", false, { targetingKey: "u2" })).toBe(true)
+})

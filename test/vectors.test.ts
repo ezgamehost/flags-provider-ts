@@ -11,10 +11,11 @@ test("vectors are present", () => {
   expect(files.length).toBeGreaterThan(0)
 })
 
+for (const dynamicCodeGeneration of [false, true])
 for (const file of files) {
   const v = JSON.parse(readFileSync(new URL(file, dir), "utf8"))
-  describe(v.name, () => {
-    const ev = new Evaluator(JSON.stringify(v.snapshot))
+  describe(`${v.name}${dynamicCodeGeneration ? " (dynamic code generation)" : ""}`, () => {
+    const ev = new Evaluator(JSON.stringify(v.snapshot), undefined, { dynamicCodeGeneration })
     for (const [i, c] of v.cases.entries()) {
       test(`${i} ${c.flag} ${JSON.stringify(c.context)}`, () => {
         const r = ev.resolve(c.type, c.flag, c.default, c.context)

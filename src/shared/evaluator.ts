@@ -16,8 +16,13 @@ export class Evaluator {
   readonly #core: FlagdCore
   readonly #fingerprints: Map<string, string>
 
-  /** Loads a snapshot (flagd JSON as flags-data serves it). Throws on an invalid snapshot. */
-  constructor(snapshotJson: string, logger: Logger = quiet) {
+  /**
+   * Loads a snapshot (flagd JSON as flags-data serves it). Throws on an invalid snapshot. The
+   * core runs without dynamic code generation (it works in every runtime, edge ones included);
+   * `dynamicCodeGeneration: true` uses the core's compiled mode, which the conformance suite also
+   * runs.
+   */
+  constructor(snapshotJson: string, logger: Logger = quiet, options: { dynamicCodeGeneration?: boolean } = {}) {
     let parsed: unknown
     try {
       parsed = JSON.parse(snapshotJson)
@@ -31,7 +36,7 @@ export class Evaluator {
       throw new Error("invalid snapshot: metadata.snapshotVersion isn't a non-negative integer")
     }
     this.version = version
-    this.#core = new FlagdCore(undefined, logger, { disableDynamicCodeGeneration: true })
+    this.#core = new FlagdCore(undefined, logger, { disableDynamicCodeGeneration: !options.dynamicCodeGeneration })
     this.#core.setConfigurations(snapshotJson)
     this.#fingerprints = fingerprints(parsed.flags, isObject(parsed.$evaluators) ? parsed.$evaluators : {})
   }
