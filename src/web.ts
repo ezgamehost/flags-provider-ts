@@ -20,7 +20,7 @@ import {
 } from "@openfeature/web-sdk"
 import type { FlagType } from "./shared/evaluator.ts"
 import { backoffMs, childController, isFatalStatus, retryAfterMs, sleep, trimEndpoint } from "./shared/http.ts"
-import { endReason, watchedSSE } from "./shared/sse.ts"
+import { endReason, isEventStream, watchedSSE } from "./shared/sse.ts"
 
 export { DEFAULT_ENDPOINT } from "./shared/http.ts"
 
@@ -101,6 +101,8 @@ export class EzghWebProvider implements Provider {
   #init: "pending" | "done" | "failed" = "pending"
   #recovering = false
   #inContextChange = false
+  /** The highest client artifact version a `changed` event has named. */
+  #lastChanged = 0
   #refreshing: Promise<void> | null = null
   #refreshAgain = false
   #timer: ReturnType<typeof setInterval> | undefined
@@ -333,61 +335,79 @@ export class EzghWebProvider implements Provider {
     let failures = 0
     let first = true
     while (!this.#abort.signal.aborted && !this.#fatal) {
-      const ctl = childController(this.#abort.signal)
-      let retryAfter: number | undefined
-      let res: Response | undefined
+      let out: { established: boolean; ended?: string; retryAfter?: number }
       try {
-        res = await this.#fetch(`${this.#endpoint}/v1/client/stream`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${this.#key}`, "Content-Type": "application/json", Accept: "text/event-stream" },
-          body: "{}",
-          signal: ctl.signal,
-        })
-      } catch {
-        res = undefined
+        out = await this.#streamOnce(first)
+      } catch (e) {
+        // Anything unexpected is a transient failure, never a silent stop.
+        this.#log.warn(`client stream: ${(e as Error).message}`)
+        out = { established: false }
       }
-      if (this.#abort.signal.aborted) return
-      if (res && !res.ok) {
-        await res.body?.cancel()
-        if (isFatalStatus(res.status)) {
-          this.#fatalize(`the data plane refused the client key (${res.status})`)
-          return
-        }
-        retryAfter = retryAfterMs(res)
-      }
-      if (res?.ok && res.body) {
-        failures = 0
-        // Changes may have happened while there was no stream.
-        if (!first) void this.#refresh()
+      if (this.#abort.signal.aborted || this.#fatal) return
+      if (out.established) {
         first = false
-        let ended: string | undefined
-        try {
-          for await (const ev of watchedSSE(res.body, ctl, this.#idleMs)) {
-            if (ev.event === "changed") void this.#refresh()
-            else if (ev.event === "end") {
-              ended = endReason(ev.data)
-              break
-            }
-          }
-        } catch {
-          // dropped: reconnect below
-        } finally {
-          ctl.abort()
-        }
-        if (ended !== undefined) {
-          if (ended === "revoked") {
-            this.#fatalize("the client key was revoked")
-            return
-          }
-          if (ended === "shutdown") await sleep(Math.random() * this.#minBackoff, this.#abort.signal)
-          continue
-        }
+        failures = 0
+      }
+      if (out.ended === "revoked" || out.ended === "environmentDeleted") {
+        this.#fatalize(out.ended === "revoked" ? "the client key was revoked" : "the client key's environment was deleted")
+        return
+      }
+      if (out.ended !== undefined) {
+        if (out.ended === "shutdown") await sleep(Math.random() * this.#minBackoff, this.#abort.signal)
+        continue
+      }
+      if (out.established) {
         await sleep(backoffMs(1, this.#minBackoff, this.#maxBackoff), this.#abort.signal)
         continue
       }
       failures++
-      await sleep(backoffMs(failures, this.#minBackoff, this.#maxBackoff, retryAfter), this.#abort.signal)
+      await sleep(backoffMs(failures, this.#minBackoff, this.#maxBackoff, out.retryAfter), this.#abort.signal)
     }
+  }
+
+  /** One client stream connection, from the request until it ends. */
+  async #streamOnce(first: boolean): Promise<{ established: boolean; ended?: string; retryAfter?: number }> {
+    const ctl = childController(this.#abort.signal)
+    let res: Response
+    try {
+      res = await this.#fetch(`${this.#endpoint}/v1/client/stream`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${this.#key}`, "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: "{}",
+        signal: ctl.signal,
+      })
+    } catch {
+      return { established: false }
+    }
+    if (!res.ok || !res.body || !isEventStream(res)) {
+      await res.body?.cancel()
+      if (isFatalStatus(res.status)) this.#fatalize(`the data plane refused the client key (${res.status})`)
+      const retryAfter = retryAfterMs(res)
+      return retryAfter === undefined ? { established: false } : { established: false, retryAfter }
+    }
+    // Connected only once the stream sends its first byte (the opening comment).
+    let established = false
+    const onActivity = () => {
+      if (established) return
+      established = true
+      // Changes may have happened while there was no stream.
+      if (!first) void this.#refresh()
+    }
+    try {
+      for await (const ev of watchedSSE(res.body, ctl, this.#idleMs, onActivity)) {
+        if (ev.event === "changed") {
+          const v = changedVersion(ev.data)
+          if (v !== undefined && v < this.#lastChanged) continue // an older version, from a lagging pod
+          if (v !== undefined) this.#lastChanged = v
+          void this.#refresh()
+        } else if (ev.event === "end") return { established, ended: endReason(ev.data) }
+      }
+    } catch {
+      // dropped: the caller reconnects
+    } finally {
+      ctl.abort()
+    }
+    return { established }
   }
 
   /** The key was refused: stop everything. Answers the error to throw. */
@@ -399,6 +419,15 @@ export class EzghWebProvider implements Provider {
     void this.onClose()
     if (this.#init !== "pending" && !this.#inContextChange) this.events.emit(ProviderEvents.Error, { errorCode: ErrorCode.PROVIDER_FATAL, message: err.message })
     return err
+  }
+}
+
+function changedVersion(data: string): number | undefined {
+  try {
+    const v = (JSON.parse(data) as { version?: unknown }).version
+    return typeof v === "number" ? v : undefined
+  } catch {
+    return undefined
   }
 }
 

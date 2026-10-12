@@ -74,6 +74,10 @@ export class FakeDataPlane {
   /** Bulk OFREP: what the client key sees for a context. */
   bulk: (context: Record<string, unknown>) => BulkFlag[] = () => []
   clientVersion = 1
+  /** The streams' Content-Type (a wrong one must not count as connected). */
+  streamContentType = "text/event-stream; charset=utf-8"
+  /** Streams open with a 200 but send nothing (no opening comment, no snapshot). */
+  silentOpen = false
   readonly #streams = new Set<Stream>()
   readonly #server: ReturnType<typeof Bun.serve>
 
@@ -96,8 +100,8 @@ export class FakeDataPlane {
   }
 
   /** Bumps the client artifact's version and sends `changed` to every open client stream. */
-  clientChanged(): void {
-    this.clientVersion++
+  clientChanged(version?: number): void {
+    this.clientVersion = version ?? this.clientVersion + 1
     for (const s of this.#streams) if (s.kind === "client") this.#send(s, `event: changed\nid: ${this.clientVersion}\ndata: {"version":${this.clientVersion}}\n\n`)
   }
 
@@ -189,6 +193,7 @@ export class FakeDataPlane {
         start: (ctl) => {
           stream = { kind: want, key, ctl, closed: false }
           this.#streams.add(stream)
+          if (this.silentOpen) return
           ctl.enqueue(enc.encode(": open\n\n"))
           if (want === "server" && known !== this.version) ctl.enqueue(enc.encode(`event: snapshot\nid: ${this.version}\ndata: ${this.snapshot}\n\n`))
         },
@@ -197,7 +202,7 @@ export class FakeDataPlane {
           this.#streams.delete(stream)
         },
       })
-      return new Response(rs, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store" } })
+      return new Response(rs, { headers: { "Content-Type": this.streamContentType, "Cache-Control": "no-store" } })
     }
     if (route === "POST /ofrep/v1/evaluate/flags") {
       let context: unknown

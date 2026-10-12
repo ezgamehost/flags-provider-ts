@@ -266,3 +266,26 @@ test("a context change that fails answers defaults, then recovers with READY", a
   expect(client.providerStatus).toBe(ClientProviderStatus.READY)
   expect(client.getStringValue("greeting", "")).toBe("hi bob")
 })
+
+test("live: a changed event naming an older version is ignored", async () => {
+  const p = provider({ live: true })
+  await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1)
+  fake.clientChanged(5)
+  await fake.waitFor(() => bulks().length === 2, 3000, "the refetch")
+  fake.clientChanged(3)
+  await Bun.sleep(100)
+  expect(bulks().length).toBe(2)
+  fake.clientChanged(6)
+  await fake.waitFor(() => bulks().length === 3, 3000, "the next refetch")
+})
+
+test("end environmentDeleted on the live stream: PROVIDER_FATAL", async () => {
+  const p = provider({ live: true })
+  const { client } = await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1)
+  const err = nextEvent(p, ProviderEvents.Error)
+  fake.endStreams("environmentDeleted")
+  expect((await err)?.errorCode).toBe(ErrorCode.PROVIDER_FATAL)
+  expect(client.providerStatus).toBe(ClientProviderStatus.FATAL)
+})

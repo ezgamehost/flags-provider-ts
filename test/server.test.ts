@@ -318,3 +318,51 @@ test("a silent connection is abandoned after the idle timeout", async () => {
   await fake.waitFor(() => fake.openStreams === 1)
   await fake.waitFor(() => streamOpens().length >= 2, 3000, "a reconnect after silence")
 })
+
+test("an older snapshot is never installed", async () => {
+  const p = provider()
+  const client = await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1)
+  let changed = false
+  p.events.addHandler(ProviderEvents.ConfigurationChanged, () => (changed = true))
+  fake.setSnapshot(snapshot(0, { a: bool(false, 9) }))
+  await Bun.sleep(50)
+  expect(changed).toBe(false)
+  expect(await client.getBooleanValue("a", false)).toBe(true)
+})
+
+test("end environmentDeleted is fatal at once", async () => {
+  const p = provider()
+  const client = await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1)
+  const err = nextEvent(p, ProviderEvents.Error)
+  fake.endStreams("environmentDeleted")
+  expect((await err)?.errorCode).toBe(ErrorCode.PROVIDER_FATAL)
+  expect(client.providerStatus).toBe(ProviderStatus.FATAL)
+  await Bun.sleep(100)
+  expect(streamOpens().length).toBe(1)
+})
+
+test("a stream that isn't text/event-stream is a failed attempt", async () => {
+  const p = provider({ pollIntervalMs: 50 })
+  await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1)
+  fake.streamContentType = "application/json"
+  fake.dropStreams()
+  // Three failed attempts, then polling.
+  await fake.waitFor(() => fake.of("/v1/sync/snapshot").length >= 2, 3000, "polling")
+})
+
+test("a 200 that sends nothing isn't connected: STALE still comes", async () => {
+  const p = provider({ staleAfterMs: 100, pollIntervalMs: 50 })
+  const client = await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1)
+  const stale = nextEvent(p, ProviderEvents.Stale)
+  fake.silentOpen = true
+  fake.force = { status: 503, paths: ["/v1/sync/snapshot"] }
+  fake.dropStreams()
+  await stale
+  expect(client.providerStatus).toBe(ProviderStatus.STALE)
+  fake.force = null
+  fake.silentOpen = false
+})

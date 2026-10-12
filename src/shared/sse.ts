@@ -107,3 +107,8 @@ export function endReason(data: string): string {
     return "unknown"
   }
 }
+
+/** Whether a response is an event stream (Content-Type text/event-stream). */
+export function isEventStream(res: Response): boolean {
+  return (res.headers.get("content-type") ?? "").toLowerCase().startsWith("text/event-stream")
+}

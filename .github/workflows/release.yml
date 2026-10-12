@@ -1,0 +1,59 @@
+name: Release
+
+# Cuts v<version>: a detached commit on top of main that adds the built dist/ (package managers
+# don't reliably build a git dependency: Bun skips lifecycle scripts), tagged and pushed as the tag
+# only. main never holds dist/. Install with `npm i github:ezgamehost/flags-provider-ts#v<version>`.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the v (e.g. 0.1.0)"
+        required: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: version is X.Y.Z and the tag is new
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::version must be X.Y.Z (got $VERSION)"; exit 1; }
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: the tag doesn't exist yet
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then echo "::error::v$VERSION already exists"; exit 1; fi
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run build
+      - name: commit dist/ on a detached HEAD, tag it, push the tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --detach
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("package.json","utf8"));p.version=process.env.VERSION;fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n")'
+          git add package.json
+          git add -f dist
+          git commit -m "Release v$VERSION (built dist/)"
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push origin "refs/tags/v$VERSION"

@@ -50,7 +50,8 @@ if (await flags.getBooleanValue("new-checkout", false, { targetingKey: user.id, 
   or disappeared (a segment edit counts for the flags using it; the list can be empty).
 - **Disconnected** for 30 seconds: it keeps evaluating the last snapshot and emits
   `PROVIDER_STALE`, then `PROVIDER_READY` once it reaches the data plane again.
-- **A revoked or unknown key** is fatal (a stream ending with `revoked`, or a `401`/`403`):
+- **A revoked or unknown key** is fatal (a stream ending with `revoked` or `environmentDeleted`,
+  or a `401`/`403`):
   `PROVIDER_ERROR` with `PROVIDER_FATAL`, the client status becomes `FATAL` (OpenFeature then
   answers defaults), and the provider stops.
 - **Reasons:** `TARGETING_MATCH`, `STATIC`, `DEFAULT`, and `DISABLED` for a flag that's off in
@@ -100,7 +101,7 @@ OpenFeature.setProvider(new EzghWebProvider({ clientKey: "ezgh_fc_…" }))
 - **Live updates** are opt-in: `new EzghWebProvider({ clientKey, live: true })` keeps one stream
   per tab open and refetches as soon as a client-side flag changes.
 - Nothing is stored in `localStorage` or `sessionStorage`; results live in memory only.
-- A revoked key is fatal (`PROVIDER_FATAL`), as for the server provider.
+- A revoked key or a deleted environment is fatal (`PROVIDER_FATAL`), as for the server provider.
 
 With React, use OpenFeature's React SDK; there's no EZGH React package:
 
@@ -141,3 +142,13 @@ edit the vectors here; a failing vector is a cross-core disagreement to fix in f
 bun install
 bun run check   # typecheck, tests (vectors included), build, a Node import smoke test
 ```
+
+**End to end:** `scripts/e2e.sh <flags-stack checkout>` builds flags-stack and its fake org-api,
+runs `flags-stack all` on `DATABASE_URL` (a database of its own) and `REDIS_URL`, and runs
+`test/e2e/e2e.test.ts`: an environment, a client-side flag and both kinds of key through the API;
+both providers see it off, then on within seconds of a config write; revoking the server key makes
+its provider fatal. CI runs it in the E2E workflow against flags-stack at `.flags-stack-rev`.
+
+**Releases:** the Release workflow (manual, with a version) runs the checks, builds, and pushes tag
+`v<version>` on a detached commit that adds `dist/` and sets `package.json`'s version. `main`
+never holds `dist/`.

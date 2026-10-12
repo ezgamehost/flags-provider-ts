@@ -17,7 +17,7 @@ import {
 } from "@openfeature/server-sdk"
 import { changedKeys, Evaluator, type FlagType } from "./shared/evaluator.ts"
 import { backoffMs, childController, isFatalStatus, retryAfterMs, sleep, trimEndpoint } from "./shared/http.ts"
-import { endReason, watchedSSE } from "./shared/sse.ts"
+import { endReason, isEventStream, watchedSSE } from "./shared/sse.ts"
 
 export { DEFAULT_ENDPOINT } from "./shared/http.ts"
 
@@ -233,11 +233,18 @@ export class EzghProvider implements Provider {
   async #syncLoop(): Promise<void> {
     let failures = 0
     while (!this.#abort.signal.aborted && !this.#fatal) {
-      const out = await this.#streamOnce()
+      let out: StreamOutcome
+      try {
+        out = await this.#streamOnce()
+      } catch (e) {
+        // Anything unexpected is a transient failure, never a silent stop.
+        this.#log.warn(`sync stream: ${(e as Error).message}`)
+        out = { kind: "failed", established: false }
+      }
       if (out.kind === "fatal" || this.#abort.signal.aborted) return
       if (out.kind === "end") {
-        if (out.reason === "revoked") {
-          this.#fatalize("the SDK key was revoked")
+        if (out.reason === "revoked" || out.reason === "environmentDeleted") {
+          this.#fatalize(out.reason === "revoked" ? "the SDK key was revoked" : "the SDK key's environment was deleted")
           return
         }
         // rotate, shutdown: reconnect at once (shutdown with a little jitter).
@@ -272,7 +279,7 @@ export class EzghProvider implements Provider {
     } catch {
       return { kind: "failed", established: false }
     }
-    if (!res.ok || !res.body) {
+    if (!res.ok || !res.body || !isEventStream(res)) {
       await res.body?.cancel()
       if (isFatalStatus(res.status)) {
         this.#fatalize(`the data plane refused the SDK key (${res.status})`)
@@ -282,21 +289,32 @@ export class EzghProvider implements Provider {
       return retryAfter === undefined ? { kind: "failed", established: false } : { kind: "failed", established: false, retryAfter }
     }
 
-    this.#connected = true
-    this.#stopPolling()
-    this.#contact()
+    // Connected only once the stream sends its first byte (the opening comment).
+    let established = false
+    const onActivity = () => {
+      if (established) {
+        this.#lastContact = Date.now()
+        return
+      }
+      established = true
+      this.#connected = true
+      this.#stopPolling()
+      this.#contact()
+    }
     try {
-      for await (const ev of watchedSSE(res.body, ctl, this.#idleMs, () => (this.#lastContact = Date.now()))) {
+      for await (const ev of watchedSSE(res.body, ctl, this.#idleMs, onActivity)) {
         if (ev.event === "snapshot") this.#apply(ev.data)
         else if (ev.event === "end") return { kind: "end", reason: endReason(ev.data) }
       }
-      return { kind: "failed", established: true }
+      return { kind: "failed", established }
     } catch {
-      return { kind: "failed", established: true }
+      return { kind: "failed", established }
     } finally {
       ctl.abort()
-      this.#connected = false
-      if (!this.#fatal) this.#scheduleStale()
+      if (established) {
+        this.#connected = false
+        if (!this.#fatal) this.#scheduleStale()
+      }
     }
   }
 
@@ -306,7 +324,7 @@ export class EzghProvider implements Provider {
     this.#polling = ctl
     void (async () => {
       while (!ctl.signal.aborted && !this.#fatal) {
-        const wait = await this.#pollOnce(ctl.signal)
+        const wait = await this.#pollOnce(ctl.signal).catch(() => undefined)
         await sleep(Math.max(this.#pollMs, wait ?? 0), ctl.signal)
       }
     })()
