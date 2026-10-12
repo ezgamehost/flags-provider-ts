@@ -12,38 +12,49 @@ export interface SSEEvent {
 
 export async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<SSEEvent> {
   const reader = body.pipeThrough(new TextDecoderStream() as unknown as ReadableWritablePair<string, Uint8Array>).getReader()
-  let buf = ""
+  // A line still waiting for its ending, in pieces: each chunk is scanned once, so a long line
+  // (a whole snapshot is one `data:` line) costs linear time, not a rescan per chunk.
+  let partial: string[] = []
   let first = true
+  let skipLF = false // the last chunk ended with a CR: an LF starting the next one is its pair
   let event = ""
   let data: string[] = []
   let lastId: string | undefined
-  let eof = false
+  const ending = /[\r\n]/g
   try {
     for (;;) {
       const { value, done } = await reader.read()
-      if (done) {
-        if (!buf.endsWith("\r")) return
-        eof = true // a CR that ended the stream is a line ending
-      } else buf += value
-      if (first && buf.length > 0) {
-        if (buf.charCodeAt(0) === 0xfeff) buf = buf.slice(1)
+      if (done) return // an unfinished line or frame at EOF dispatches nothing
+      let chunk = value
+      if (first && chunk.length > 0) {
+        if (chunk.charCodeAt(0) === 0xfeff) chunk = chunk.slice(1)
         first = false
       }
-      let start = 0
+      let i = 0
+      if (skipLF && chunk.length > 0) {
+        if (chunk.charCodeAt(0) === 10) i = 1
+        skipLF = false
+      }
       for (;;) {
-        let end = -1
-        for (let i = start; i < buf.length; i++) {
-          const ch = buf.charCodeAt(i)
-          if (ch === 10 || ch === 13) {
-            end = i
-            break
-          }
+        ending.lastIndex = i
+        const m = ending.exec(chunk)
+        if (!m) {
+          if (i < chunk.length) partial.push(chunk.slice(i))
+          break
         }
-        if (end < 0) break
-        // A CR at the very end of the buffer may be the first half of a CRLF: wait for more.
-        if (buf.charCodeAt(end) === 13 && end === buf.length - 1 && !eof) break
-        const line = buf.slice(start, end)
-        start = end + (buf.charCodeAt(end) === 13 && buf.charCodeAt(end + 1) === 10 ? 2 : 1)
+        const j = m.index
+        let line = chunk.slice(i, j)
+        if (partial.length > 0) {
+          partial.push(line)
+          line = partial.join("")
+          partial = []
+        }
+        i = j + 1
+        if (chunk.charCodeAt(j) === 13) {
+          if (i < chunk.length) {
+            if (chunk.charCodeAt(i) === 10) i++
+          } else skipLF = true
+        }
         if (line === "") {
           if (data.length > 0) {
             const ev: SSEEvent = { event: event || "message", data: data.join("\n") }
@@ -63,8 +74,6 @@ export async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator
         else if (field === "data") data.push(val)
         else if (field === "id" && !val.includes("\0")) lastId = val
       }
-      buf = buf.slice(start)
-      if (eof) return
     }
   } finally {
     await reader.cancel().catch(() => {})

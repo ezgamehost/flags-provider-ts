@@ -68,7 +68,7 @@ if (await flags.getBooleanValue("new-checkout", false, { targetingKey: user.id, 
 | `timeoutMs` | `10000` | How long `initialize` waits for the first snapshot. On a timeout it fails (status `ERROR`) and keeps trying; it emits `PROVIDER_READY` when the snapshot arrives. |
 | `pollIntervalMs` | `30000` | The snapshot poll interval while the stream is down. |
 | `staleAfterMs` | `30000` | How long without reaching the data plane before `PROVIDER_STALE`. |
-| `minBackoffMs`, `maxBackoffMs` | `1000`, `60000` | Stream reconnect backoff. |
+| `minBackoffMs`, `maxBackoffMs` | `1000`, `60000` | Stream reconnect backoff. A `Retry-After` is honoured up to the maximum. A stream ending with `rotate` reconnects at once; `shutdown` after a little jitter; any other reason backs off like a failure. |
 | `idleTimeoutMs` | `45000` | A stream silent this long (the data plane sends a heartbeat every 15 s) is reconnected. |
 | `fetch`, `logger` | global `fetch`, console | |
 
@@ -124,7 +124,10 @@ function Checkout() {
 
 Options: `clientKey`, `endpoint`, `live` (`false`), `refreshMs` (5 minutes), `timeoutMs` (10 s for
 the first evaluation; it keeps retrying after and emits `PROVIDER_READY`), `minBackoffMs`,
-`maxBackoffMs`, `idleTimeoutMs`, `fetch`, `logger`.
+`maxBackoffMs`, `idleTimeoutMs`, `changedRetryMs` (1 s: after a `changed` whose refetch is a `304`,
+one more refetch this much later), `fetch`, `logger`. A context the data plane refuses (`400
+INVALID_CONTEXT`) isn't retried; the provider answers defaults until the context changes. Each
+live-stream connection refreshes once (conditionally), the first included.
 
 ## Conformance
 

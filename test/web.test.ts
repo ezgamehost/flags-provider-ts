@@ -160,12 +160,15 @@ test("live: a changed event triggers a bulk refetch and CONFIGURATION_CHANGED", 
   const stream = fake.of("/v1/client/stream", "POST")
   expect(stream.length).toBe(1)
   expect(stream[0]!.headers.authorization).toBe(`Bearer ${clientKey()}`)
+  // The first connection refreshes too (conditionally: a 304 here).
+  await fake.waitFor(() => bulks().length === 2, 3000, "the connection refresh")
+  expect(bulks()[1]!.headers["if-none-match"]).toBeDefined()
   const changed = nextEvent(p, ProviderEvents.ConfigurationChanged)
   on = true
   fake.clientChanged()
   expect((await changed)?.flagsChanged).toEqual(["new-checkout"])
   expect(client.getBooleanValue("new-checkout", false)).toBe(true)
-  expect(bulks().length).toBe(2)
+  expect(bulks().length).toBe(3)
   // Rotation reconnects.
   fake.endStreams("rotate")
   await fake.waitFor(() => fake.of("/v1/client/stream").length === 2 && fake.openStreams === 1, 3000, "a reconnect")
@@ -270,14 +273,79 @@ test("a context change that fails answers defaults, then recovers with READY", a
 test("live: a changed event naming an older version is ignored", async () => {
   const p = provider({ live: true })
   await ready(p)
-  await fake.waitFor(() => fake.openStreams === 1)
+  await fake.waitFor(() => fake.openStreams === 1 && bulks().length === 2)
+  on = true
   fake.clientChanged(5)
-  await fake.waitFor(() => bulks().length === 2, 3000, "the refetch")
+  await fake.waitFor(() => bulks().length === 3, 3000, "the refetch")
   fake.clientChanged(3)
   await Bun.sleep(100)
-  expect(bulks().length).toBe(2)
+  expect(bulks().length).toBe(3)
+  on = false
   fake.clientChanged(6)
-  await fake.waitFor(() => bulks().length === 3, 3000, "the next refetch")
+  await fake.waitFor(() => bulks().length === 4, 3000, "the next refetch")
+})
+
+test("live: a changed whose refetch is a 304 refetches once more", async () => {
+  const p = provider({ live: true, changedRetryMs: 50 })
+  const { client } = await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1 && bulks().length === 2)
+  // The pod answering hasn't got the change yet: the refetch is a 304; the retry sees it.
+  fake.clientChanged()
+  await fake.waitFor(() => bulks().length === 3, 3000, "the refetch")
+  on = true
+  await fake.waitFor(() => bulks().length === 4, 3000, "the retry")
+  await fake.waitFor(() => client.getBooleanValue("new-checkout", false), 3000, "the new value")
+  await Bun.sleep(150)
+  expect(bulks().length).toBe(4)
+})
+
+test("onContextChange announces no CONFIGURATION_CHANGED (the SDK announces the context change)", async () => {
+  const p = provider()
+  const { domain } = await ready(p)
+  let changed = 0
+  p.events.addHandler(ProviderEvents.ConfigurationChanged, () => changed++)
+  await OpenFeature.setContext(domain, { targetingKey: "bob" })
+  await Bun.sleep(20)
+  expect(changed).toBe(0)
+})
+
+for (const body of [{ errorCode: "INVALID_CONTEXT", errorDetails: "context" }, { error: { code: "bad_request" } }])
+test(`400 ${JSON.stringify(body)} is final for that context: no retries`, async () => {
+  fake.force = { status: 400, body }
+  const p = provider()
+  const d = `w${++domain}`
+  await OpenFeature.setContext(d, { targetingKey: "alice" })
+  await expect(OpenFeature.setProviderAndWait(d, p)).rejects.toThrow()
+  await Bun.sleep(150)
+  expect(bulks().length).toBe(1)
+  expect(OpenFeature.getClient(d).providerStatus).toBe(ClientProviderStatus.ERROR)
+  // A new context is tried again.
+  fake.force = null
+  await OpenFeature.setContext(d, { targetingKey: "bob" })
+  expect(OpenFeature.getClient(d).providerStatus).toBe(ClientProviderStatus.READY)
+  expect(OpenFeature.getClient(d).getStringValue("greeting", "")).toBe("hi bob")
+})
+
+test("an end with an unknown reason backs off like a failure", async () => {
+  const p = provider({ live: true, minBackoffMs: 300, maxBackoffMs: 600 })
+  await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1)
+  fake.endStreams("something-new")
+  const at = Date.now()
+  await fake.waitFor(() => fake.of("/v1/client/stream").length === 2, 3000, "a reconnect")
+  expect(fake.of("/v1/client/stream")[1]!.at - at).toBeGreaterThanOrEqual(140)
+})
+
+test("reusable after onClose", async () => {
+  const p = provider({ live: true })
+  await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1)
+  await p.onClose()
+  await fake.waitFor(() => fake.openStreams === 0)
+  // (The SDK initializes a provider instance once per registration, so call it directly.)
+  await p.initialize({ targetingKey: "bob" })
+  expect(p.resolveStringEvaluation("greeting", "").value).toBe("hi bob")
+  await fake.waitFor(() => fake.openStreams === 1, 3000, "the stream again")
 })
 
 test("end environmentDeleted on the live stream: PROVIDER_FATAL", async () => {

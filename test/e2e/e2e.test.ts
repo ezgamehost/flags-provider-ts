@@ -53,7 +53,17 @@ describe.skipIf(!api)("e2e against flags-stack", () => {
       expect(server.key).toStartWith("ezgh_fs_")
       expect(client.key).toStartWith("ezgh_fc_")
 
-      // 2. The server provider is ready (once the first snapshot compiles) and the flag is off.
+      // The compiler works asynchronously: wait until the environment's snapshot has the flag.
+      const deadline = Date.now() + 30_000
+      for (;;) {
+        const res = await fetch(`${data}/v1/sync/snapshot`, { headers: { Authorization: `Bearer ${server.key}` } })
+        const text = await res.text()
+        if (res.ok && (JSON.parse(text) as { flags?: Record<string, unknown> }).flags?.["e2e-flag"]) break
+        if (Date.now() > deadline) throw new Error(`no snapshot with e2e-flag within 30 s (last: ${res.status} ${text.slice(0, 200)})`)
+        await Bun.sleep(200)
+      }
+
+      // 2. The server provider is ready and the flag is off.
       const sp = new EzghProvider({ sdkKey: server.key, endpoint: data, timeoutMs: 30_000 })
       closers.push(() => sp.onClose())
       await ServerOpenFeature.setProviderAndWait("e2e", sp)

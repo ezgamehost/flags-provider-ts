@@ -76,7 +76,8 @@ export class EzghProvider implements Provider {
   readonly #maxBackoff: number
   readonly #idleMs: number
 
-  readonly #abort = new AbortController()
+  /** Made by each initialize, so the provider can be initialized again after onClose. */
+  #abort = new AbortController()
   #ev: Evaluator | null = null
   /** The snapshot came from the data plane (not the bootstrap file), so its version can be named to it. */
   #fromNetwork = false
@@ -110,6 +111,18 @@ export class EzghProvider implements Provider {
   }
 
   async initialize(): Promise<void> {
+    this.#abort.abort()
+    this.#abort = new AbortController()
+    clearTimeout(this.#staleTimer)
+    this.#ev = null
+    this.#fromNetwork = false
+    this.#init = "pending"
+    this.#fatal = false
+    this.#connected = false
+    this.#stale = false
+    this.#lastContact = Date.now()
+    this.#polling = null
+    this.#running = false
     if (this.#bootstrapPath) {
       const { readFile } = await import("node:fs/promises")
       this.#apply(await readFile(this.#bootstrapPath, "utf8"), { throwOnInvalid: true, bootstrap: true })
@@ -126,6 +139,9 @@ export class EzghProvider implements Provider {
         if (!this.#fatal) this.#startSync()
         throw e
       }
+    } else {
+      // Ready from the bootstrap file without reaching the data plane: STALE if it stays unreachable.
+      this.#scheduleStale()
     }
     this.#init = "done"
     this.#startSync()
@@ -218,6 +234,7 @@ export class EzghProvider implements Provider {
       }
     } finally {
       clearTimeout(timer)
+      ctl.abort()
     }
     throw new GeneralError(`EzghProvider: no snapshot from ${this.#endpoint} within ${this.#timeoutMs} ms`)
   }
@@ -227,46 +244,61 @@ export class EzghProvider implements Provider {
   #startSync(): void {
     if (this.#running || this.#abort.signal.aborted) return
     this.#running = true
-    void this.#syncLoop()
+    void this.#syncLoop(this.#abort.signal)
   }
 
-  async #syncLoop(): Promise<void> {
+  /** Follows the stream until `signal` (this run's) aborts or the key is refused. */
+  async #syncLoop(signal: AbortSignal): Promise<void> {
     let failures = 0
-    while (!this.#abort.signal.aborted && !this.#fatal) {
+    while (!signal.aborted && !this.#fatal) {
       let out: StreamOutcome
       try {
-        out = await this.#streamOnce()
+        out = await this.#streamOnce(signal)
       } catch (e) {
         // Anything unexpected is a transient failure, never a silent stop.
         this.#log.warn(`sync stream: ${(e as Error).message}`)
         out = { kind: "failed", established: false }
       }
-      if (out.kind === "fatal" || this.#abort.signal.aborted) return
+      if (out.kind === "fatal" || signal.aborted) return
       if (out.kind === "end") {
         if (out.reason === "revoked" || out.reason === "environmentDeleted") {
           this.#fatalize(out.reason === "revoked" ? "the SDK key was revoked" : "the SDK key's environment was deleted")
           return
         }
-        // rotate, shutdown: reconnect at once (shutdown with a little jitter).
-        failures = 0
-        if (out.reason === "shutdown") await sleep(Math.random() * this.#minBackoff, this.#abort.signal)
-        continue
-      }
-      if (out.established) {
+        if (out.reason === "rotate") {
+          failures = 0
+          continue // the only reason to reconnect at once
+        }
+        if (out.reason === "shutdown") {
+          // The pod is draining: reconnect (to another one) after a little jitter.
+          failures = 0
+          await sleep(Math.random() * this.#minBackoff, signal)
+          continue
+        }
+        // An unknown reason is a failed attempt.
+      } else if (out.kind === "failed" && out.established) {
         // A stream that was up and dropped: reconnect soon; it isn't a failed attempt.
         failures = 0
-        await sleep(backoffMs(1, this.#minBackoff, this.#maxBackoff, out.retryAfter), this.#abort.signal)
+        await sleep(backoffMs(1, this.#minBackoff, this.#maxBackoff, out.retryAfter), signal)
         continue
       }
       failures++
       if (failures >= STREAM_FAILURES_BEFORE_POLLING) this.#startPolling()
-      await sleep(backoffMs(failures, this.#minBackoff, this.#maxBackoff, out.retryAfter), this.#abort.signal)
+      await sleep(backoffMs(failures, this.#minBackoff, this.#maxBackoff, out.kind === "failed" ? out.retryAfter : undefined), signal)
     }
   }
 
   /** One stream connection, from the request until it ends. */
-  async #streamOnce(): Promise<StreamOutcome> {
-    const ctl = childController(this.#abort.signal)
+  async #streamOnce(signal: AbortSignal): Promise<StreamOutcome> {
+    const ctl = childController(signal)
+    try {
+      return await this.#streamWith(ctl)
+    } finally {
+      ctl.abort()
+    }
+  }
+
+  async #streamWith(ctl: AbortController): Promise<StreamOutcome> {
     let res: Response
     try {
       const body = this.#ev && this.#fromNetwork ? JSON.stringify({ version: this.#ev.version }) : "{}"
@@ -310,7 +342,6 @@ export class EzghProvider implements Provider {
     } catch {
       return { kind: "failed", established }
     } finally {
-      ctl.abort()
       if (established) {
         this.#connected = false
         if (!this.#fatal) this.#scheduleStale()
@@ -325,7 +356,7 @@ export class EzghProvider implements Provider {
     void (async () => {
       while (!ctl.signal.aborted && !this.#fatal) {
         const wait = await this.#pollOnce(ctl.signal).catch(() => undefined)
-        await sleep(Math.max(this.#pollMs, wait ?? 0), ctl.signal)
+        await sleep(Math.max(this.#pollMs, Math.min(wait ?? 0, this.#maxBackoff)), ctl.signal)
       }
     })()
   }

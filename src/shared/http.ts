@@ -18,12 +18,13 @@ export function retryAfterMs(res: Response, now = Date.now()): number | undefine
 
 /**
  * Exponential backoff with jitter: attempt 1 waits between min/2 and min, doubling up to max, and
- * never less than the server's Retry-After.
+ * never less than the server's Retry-After, itself capped at max (a broken or hostile Retry-After
+ * can't park a provider for hours).
  */
 export function backoffMs(attempt: number, minMs: number, maxMs: number, retryAfter?: number): number {
   const base = Math.min(maxMs, minMs * 2 ** Math.max(0, attempt - 1))
   const jittered = base / 2 + (Math.random() * base) / 2
-  return Math.max(jittered, retryAfter ?? 0)
+  return Math.max(jittered, Math.min(retryAfter ?? 0, maxMs))
 }
 
 /** Resolves after ms, or at once when the signal aborts. */

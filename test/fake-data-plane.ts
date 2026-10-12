@@ -68,7 +68,7 @@ export class FakeDataPlane {
   /** The current server snapshot (compact flagd JSON); null answers 503 snapshot_pending. */
   snapshot: string | null = null
   /** When set, every request gets this status (with Retry-After when given) and no stream opens. */
-  force: { status: number; retryAfter?: string; paths?: string[] } | null = null
+  force: { status: number; retryAfter?: string; paths?: string[]; body?: unknown } | null = null
   /** Keys answered 401 (revoked or unknown). */
   readonly revoked = new Set<string>()
   /** Bulk OFREP: what the client key sees for a context. */
@@ -169,7 +169,7 @@ export class FakeDataPlane {
     if (this.force && (!this.force.paths || this.force.paths.includes(url.pathname))) {
       const headers: Record<string, string> = { "Content-Type": "application/json" }
       if (this.force.retryAfter !== undefined) headers["Retry-After"] = this.force.retryAfter
-      return new Response(JSON.stringify({ error: { code: "forced", message: "forced by the test" } }), { status: this.force.status, headers })
+      return new Response(JSON.stringify(this.force.body ?? { error: { code: "forced", message: "forced by the test" } }), { status: this.force.status, headers })
     }
     const m = /^Bearer (ezgh_f([sc])_[A-Za-z0-9]{43})$/.exec(req.headers.get("authorization") ?? "")
     if (!m || this.revoked.has(m[1]!)) return json(401, { error: { code: "unauthenticated", message: "a valid SDK key is required" } })

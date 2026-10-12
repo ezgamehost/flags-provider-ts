@@ -227,7 +227,7 @@ test("fatal on 401 when reconnecting", async () => {
 })
 
 test("honours Retry-After on 429", async () => {
-  await ready(provider())
+  await ready(provider({ maxBackoffMs: 2000 }))
   await fake.waitFor(() => fake.openStreams === 1)
   fake.force = { status: 429, retryAfter: "1", paths: ["/v1/sync/stream"] }
   fake.dropStreams()
@@ -240,7 +240,7 @@ test("honours Retry-After on 429", async () => {
 test("initialize waits out a pending snapshot (503 Retry-After)", async () => {
   fake.snapshot = null
   setTimeout(() => fake.setSnapshot(snapshot(1, { a: bool(true, 1) })), 300)
-  const client = await ready(provider())
+  const client = await ready(provider({ maxBackoffMs: 2000 }))
   expect(await client.getBooleanValue("a", false)).toBe(true)
   expect(fake.of("/v1/sync/snapshot").length).toBe(2)
 })
@@ -365,4 +365,52 @@ test("a 200 that sends nothing isn't connected: STALE still comes", async () => 
   expect(client.providerStatus).toBe(ProviderStatus.STALE)
   fake.force = null
   fake.silentOpen = false
+})
+
+test("Retry-After is capped at the max backoff", async () => {
+  await ready(provider({ minBackoffMs: 50, maxBackoffMs: 100 }))
+  await fake.waitFor(() => fake.openStreams === 1)
+  fake.force = { status: 429, retryAfter: "3600", paths: ["/v1/sync/stream"] }
+  fake.dropStreams()
+  await fake.waitFor(() => streamOpens().length >= 3, 2000, "retries within the cap")
+  fake.force = null
+})
+
+test("only rotate reconnects at once: an unknown end reason backs off", async () => {
+  await ready(provider({ minBackoffMs: 300, maxBackoffMs: 600 }))
+  await fake.waitFor(() => fake.openStreams === 1)
+  fake.endStreams("something-new")
+  const at = Date.now()
+  await fake.waitFor(() => streamOpens().length === 2, 3000, "a reconnect")
+  expect(streamOpens()[1]!.at - at).toBeGreaterThanOrEqual(140)
+  fake.endStreams("rotate")
+  const at2 = Date.now()
+  await fake.waitFor(() => streamOpens().length === 3, 3000, "an immediate reconnect")
+  expect(streamOpens()[2]!.at - at2).toBeLessThan(100)
+})
+
+test("ready from bootstrap with the data plane unreachable: STALE", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ezgh-flags-"))
+  const file = join(dir, "production.json")
+  writeFileSync(file, snapshot(5, { a: bool(false, 9) }))
+  fake.force = { status: 503 }
+  const p = provider({ bootstrapPath: file, staleAfterMs: 100 })
+  const stale = nextEvent(p, ProviderEvents.Stale)
+  const client = await ready(p)
+  await stale
+  expect(client.providerStatus).toBe(ProviderStatus.STALE)
+  expect(await client.getBooleanValue("a", true)).toBe(false)
+  fake.force = null
+})
+
+test("reusable after onClose", async () => {
+  const p = provider()
+  await ready(p)
+  await fake.waitFor(() => fake.openStreams === 1)
+  await p.onClose()
+  await fake.waitFor(() => fake.openStreams === 0)
+  // (The SDK initializes a provider instance once per registration, so call it directly.)
+  await p.initialize()
+  expect((await p.resolveBooleanEvaluation("a", false, {})).value).toBe(true)
+  await fake.waitFor(() => fake.openStreams === 1, 3000, "the stream again")
 })

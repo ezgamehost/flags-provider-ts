@@ -74,3 +74,20 @@ test("a field without a colon, and a leading BOM", async () => {
     { event: "message", data: "x" },
   ])
 })
+
+test("an 8 MB line in 16 KB chunks parses in linear time", async () => {
+  const size = 8 << 20
+  const bytes = new TextEncoder().encode(`event: snapshot\nid: 9\ndata: ${"x".repeat(size)}\n\n`)
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      for (let i = 0; i < bytes.length; i += 16 << 10) c.enqueue(bytes.subarray(i, i + (16 << 10)))
+      c.close()
+    },
+  })
+  const t0 = performance.now()
+  const evs = await all(body)
+  const ms = performance.now() - t0
+  expect(evs.length).toBe(1)
+  expect(evs[0]!.data.length).toBe(size)
+  expect(ms).toBeLessThan(200)
+})
