@@ -28,8 +28,11 @@ EOF
     echo "Releases of $name are published from https://github.com/$REPO." >"$dir/README.md"
     (cd "$dir" && npm publish --access public)
     rm -rf "$dir"
-    npm deprecate "$name@0.0.0" "Placeholder; install a later version"
   fi
+  # A new package takes a little while to become writable after its first publish.
+  for _ in $(seq 30); do npm view "$name@0.0.0" deprecated --json >/dev/null 2>&1 && break; sleep 5; done
+  [ -n "$(npm view "$name@0.0.0" deprecated 2>/dev/null)" ] ||
+    npm deprecate "$name@0.0.0" "Placeholder; install a later version"
   # npm allows one trust entry per package; if one exists this fails and `npm trust list` shows it.
   npm trust github "$name" --repo "$REPO" --file "$WORKFLOW" --allow-publish --yes ||
     { echo "$name: not trusted now; check npm trust list $name" >&2; npm trust list "$name" || true; }
