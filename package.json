@@ -1,5 +1,5 @@
 {
-  "name": "@ezgh/flags-openfeature",
+  "name": "@ezghcloud/flags-openfeature",
   "version": "0.1.0",
   "description": "OpenFeature providers for EZGH Feature Flags (server: Node, Bun, Deno; web)",
   "license": "Apache-2.0",
@@ -7,7 +7,7 @@
   "sideEffects": false,
   "repository": {
     "type": "git",
-    "url": "https://github.com/ezgamehost/flags-provider-ts"
+    "url": "git+https://github.com/ezgamehost/flags-provider-ts.git"
   },
   "exports": {
     "./server": {
@@ -27,6 +27,9 @@
   ],
   "engines": {
     "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",

@@ -1,14 +1,13 @@
 name: Release
 
-# Cuts v<version>: a detached commit on top of main that adds the built dist/ (package managers
-# don't reliably build a git dependency: Bun skips lifecycle scripts), tagged and pushed as the tag
-# only. main never holds dist/. Install with `npm i github:ezgamehost/flags-provider-ts#v<version>`.
+# On a v* tag (cut after bumping package.json's version on main): check, build, pack and publish
+# @ezghcloud/flags-openfeature to npm with trusted publishing (GitHub Actions OIDC; no NPM_TOKEN,
+# provenance is automatic), then a GitHub release. Re-running skips a version already on npm.
+# npm trusts this file by name (release.yml): keep the filename. First-time setup is the owner's
+# `scripts/npm-trust.sh @ezghcloud/flags-openfeature`.
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version without the v (e.g. 0.1.0)"
-        required: true
+  push:
+    tags: ["v*"]
 
 concurrency:
   group: release
@@ -16,44 +15,58 @@ concurrency:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
-  release:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - name: version is X.Y.Z and the tag is new
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::version must be X.Y.Z (got $VERSION)"; exit 1; }
       - uses: actions/checkout@v7
         with:
-          ref: main
-          fetch-depth: 0
-      - name: the tag doesn't exist yet
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then echo "::error::v$VERSION already exists"; exit 1; fi
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: npm is new enough for trusted publishing (11.5.1+)
+        run: |
+          v=$(npm --version)
+          node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number)
+            const ok = a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1)))
+            if (!ok) { console.log(`::error::npm ${process.argv[1]} is older than 11.5.1, which trusted publishing needs`); process.exit(1) }
+          ' "$v"
+          echo "npm $v"
       - run: bun install --frozen-lockfile
+      - name: the tag matches package.json's version
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          [ "$(node -p "require('./package.json').version")" = "$v" ] || { echo "::error::package.json's version isn't $v"; exit 1; }
       - run: bun run check
       - run: bun run build
-      - name: commit dist/ on a detached HEAD, tag it, push the tag
-        env:
-          VERSION: ${{ inputs.version }}
+      - name: pack
+        id: pack
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout --detach
-          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("package.json","utf8"));p.version=process.env.VERSION;fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n")'
-          git add package.json
-          git add -f dist
-          git commit -m "Release v$VERSION (built dist/)"
-          git tag -a "v$VERSION" -m "v$VERSION"
-          git push origin "refs/tags/v$VERSION"
+          mkdir -p .packs
+          tgz=$(npm pack --pack-destination .packs --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s)[0].filename))')
+          echo "tgz=.packs/$tgz" >> "$GITHUB_OUTPUT"
+          tar -tzf ".packs/$tgz"
+      - name: publish
+        env:
+          TGZ: ${{ steps.pack.outputs.tgz }}
+        run: |
+          name=$(node -p "require('./package.json').name")
+          v=$(node -p "require('./package.json').version")
+          if npm view "$name@$v" version >/dev/null 2>&1; then echo "$name@$v is already published"; exit 0; fi
+          npm publish "$TGZ" --access public
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TGZ: ${{ steps.pack.outputs.tgz }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then echo "release $GITHUB_REF_NAME exists"; exit 0; fi
+          gh release create "$GITHUB_REF_NAME" "$TGZ" --title "$GITHUB_REF_NAME" \
+            --notes "npm install @ezghcloud/flags-openfeature@${GITHUB_REF_NAME#v}"

@@ -1,24 +1,21 @@
-# @ezgh/flags-openfeature
+# @ezghcloud/flags-openfeature
 
 [OpenFeature](https://openfeature.dev) providers for **EZGH Feature Flags**, in TypeScript:
 
-- `@ezgh/flags-openfeature/server`: `EzghProvider`, for backends on Node (20+), Bun and Deno.
+- `@ezghcloud/flags-openfeature/server`: `EzghProvider`, for backends on Node (20+), Bun and Deno.
   It keeps the environment's compiled flags in memory and evaluates locally with flagd's
   open-source core, so an evaluation never makes a network call.
-- `@ezgh/flags-openfeature/web`: `EzghWebProvider`, for browsers (React through OpenFeature's
+- `@ezghcloud/flags-openfeature/web`: `EzghWebProvider`, for browsers (React through OpenFeature's
   React SDK). It evaluates remotely, so rules never reach the browser.
 
 You write against the OpenFeature API; the provider connects it to EZGH. Licensed Apache-2.0.
 
 ## Install
 
-The package installs from this repository's release tags, which carry the built `dist/`
-(it isn't published to npm):
-
 ```bash
-npm i github:ezgamehost/flags-provider-ts#v0.1.0
-bun add github:ezgamehost/flags-provider-ts#v0.1.0
-pnpm add github:ezgamehost/flags-provider-ts#v0.1.0
+npm install @ezghcloud/flags-openfeature
+bun add @ezghcloud/flags-openfeature
+pnpm add @ezghcloud/flags-openfeature
 ```
 
 Install the OpenFeature SDK you use alongside it: `@openfeature/server-sdk` for the server
@@ -31,7 +28,7 @@ Create a **server key** (`ezgh_fs_…`) for an environment in the console or wit
 
 ```ts
 import { OpenFeature } from "@openfeature/server-sdk"
-import { EzghProvider } from "@ezgh/flags-openfeature/server"
+import { EzghProvider } from "@ezghcloud/flags-openfeature/server"
 
 await OpenFeature.setProviderAndWait(new EzghProvider({ sdkKey: process.env.EZGH_FLAGS_KEY! }))
 const flags = OpenFeature.getClient()
@@ -87,7 +84,7 @@ answers `FLAG_NOT_FOUND` exactly as a flag that doesn't exist, and rules never l
 
 ```ts
 import { OpenFeature } from "@openfeature/web-sdk"
-import { EzghWebProvider } from "@ezgh/flags-openfeature/web"
+import { EzghWebProvider } from "@ezghcloud/flags-openfeature/web"
 
 await OpenFeature.setContext({ targetingKey: user.id, plan: user.plan })
 OpenFeature.setProvider(new EzghWebProvider({ clientKey: "ezgh_fc_…" }))
@@ -152,6 +149,20 @@ runs `flags-stack all` on `DATABASE_URL` (a database of its own) and `REDIS_URL`
 both providers see it off, then on within seconds of a config write; revoking the server key makes
 its provider fatal. CI runs it in the E2E workflow against flags-stack at `.flags-stack-rev`.
 
-**Releases:** the Release workflow (manual, with a version) runs the checks, builds, and pushes tag
-`v<version>` on a detached commit that adds `dist/` and sets `package.json`'s version. `main`
-never holds `dist/`.
+## Releasing
+
+Releases go to npm as `@ezghcloud/flags-openfeature`, published by the Release workflow
+(`.github/workflows/release.yml`) with npm trusted publishing: GitHub Actions OIDC, no npm token,
+provenance attached automatically.
+
+1. Bump `version` in `package.json` and commit it on `main`.
+2. Push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+On the tag, the workflow checks the tag equals `package.json`'s version, runs `bun run check`,
+builds, packs `dist/`, publishes (skipping a version already on npm) and creates the GitHub
+release. `main` never holds `dist/`.
+
+First-time owner setup (once, logged in to npm with 2FA): `scripts/npm-trust.sh
+@ezghcloud/flags-openfeature` publishes a placeholder if the package doesn't exist yet, trusts this
+repository's `release.yml` to publish it, and requires 2FA with tokens disallowed. Keep the
+workflow's filename: the npm trust entry names it.

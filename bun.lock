@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@ezgh/flags-openfeature",
+      "name": "@ezghcloud/flags-openfeature",
       "dependencies": {
         "@openfeature/flagd-core": "4.0.1",
       },
