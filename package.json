@@ -1,6 +1,6 @@
 {
   "name": "@ezghcloud/flags-openfeature",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "OpenFeature providers for EZGH Feature Flags (server: Node, Bun, Deno; web)",
   "license": "Apache-2.0",
   "type": "module",
